@@ -4,18 +4,12 @@
  *
  * @author Dave Longley
  *
- * Copyright (c) 2011 Digital Bazaar, Inc. All rights reserved.
+ * Copyright (c) 2011-2012 Digital Bazaar, Inc. All rights reserved.
  */
-define('__S', '@subject');
-define('__T', '@type');
-define('JSONLD_RDF', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#');
-define('JSONLD_RDF_TYPE', JSONLD_RDF . 'type');
 define('JSONLD_XSD', 'http://www.w3.org/2001/XMLSchema#');
-define('JSONLD_XSD_ANY_TYPE', JSONLD_XSD . 'anyType');
 define('JSONLD_XSD_BOOLEAN', JSONLD_XSD . 'boolean');
 define('JSONLD_XSD_DOUBLE', JSONLD_XSD . 'double');
 define('JSONLD_XSD_INTEGER', JSONLD_XSD . 'integer');
-define('JSONLD_XSD_ANY_URI', JSONLD_XSD . 'anyURI');
 
 /**
  * Normalizes a JSON-LD object.
@@ -28,7 +22,7 @@ function jsonld_normalize($input)
 {
    $p = new JsonLdProcessor();
    return $p->normalize($input);
-};
+}
 
 /**
  * Removes the context from a JSON-LD object, expanding it to full-form.
@@ -39,15 +33,9 @@ function jsonld_normalize($input)
  */
 function jsonld_expand($input)
 {
-   $rval = null;
-
-   if($input !== null)
-   {
-      $rval = _expand(new stdClass(), null, $input, false);
-   }
-
-   return $rval;
-};
+   $p = new JsonLdProcessor();
+   return $p->expand(new stdClass(), null, $input);
+}
 
 /**
  * Expands the given JSON-LD object and then compacts it using the
@@ -70,37 +58,34 @@ function jsonld_compact($ctx, $input)
       // fully expand input
       $input = jsonld_expand($input);
 
-      if(is_array($input))
+      // merge context if it is an array
+      if(is_array($ctx))
       {
-         $rval = array();
-         $tmp = $input;
-      }
-      else
-      {
-         $tmp = array($input);
+         $ctx = jsonld_merge_contexts(new stdClass, $ctx);
       }
 
-      foreach($tmp as $value)
+      // setup output context
+      $ctxOut = new stdClass();
+
+      // compact
+      $p = new JsonLdProcessor();
+      $rval = $out = $p->compact(_clone($ctx), null, $input, $ctxOut);
+
+      // add context if used
+      if(count(array_keys((array)$ctxOut)) > 0)
       {
-         // setup output context
-         $ctxOut = new stdClass();
-
-         // compact
-         $out = _compact(_clone($ctx), null, $value, $ctxOut);
-
-         // add context if used
-         if(count(array_keys((array)$ctxOut)) > 0)
+         $rval = new stdClass();
+         $rval->{'@context'} = $ctxOut;
+         if(is_array($out))
          {
-            $out->{'@context'} = $ctxOut;
-         }
-
-         if($rval === null)
-         {
-            $rval = $out;
+            $rval->{_getKeywords($ctxOut)->{'@id'}} = $out;
          }
          else
          {
-            $rval[] = $out;
+            foreach($out as $k => $v)
+            {
+               $rval->{$k} = $v;
+            }
          }
       }
    }
@@ -118,125 +103,49 @@ function jsonld_compact($ctx, $input)
  */
 function jsonld_merge_contexts($ctx1, $ctx2)
 {
-   // copy contexts
-   $merged = _clone($ctx1);
-   $copy = _clone($ctx2);
-
-   // if the new context contains any IRIs that are in the merged context,
-   // remove them from the merged context, they will be overwritten
-   foreach($copy as $key => $value)
+   // merge first context if it is an array
+   if(is_array($ctx1))
    {
-      // ignore special keys starting with '@'
-      if(strpos($key, '@') !== 0)
+      $ctx1 = jsonld_merge_contexts($ctx1, $ctx2);
+   }
+
+   // copy context to merged output
+   $merged = _clone($ctx1);
+
+   if(is_array($ctx2))
+   {
+      // merge array of contexts in order
+      foreach($ctx2 as $ctx)
       {
-         foreach($merged as $mkey => $mvalue)
-         {
-            if($mvalue === $value)
-            {
-               unset($merged->$mkey);
-               break;
-            }
-         }
+         $merged = jsonld_merge_contexts($merged, $ctx);
       }
    }
-
-   // @coerce must be specially-merged, remove from contexts
-   $coerceExists =
-      property_exists($merged, '@coerce') or
-      property_exists($copy, '@coerce');
-   if($coerceExists)
+   else
    {
-      $c1 = property_exists($merged, '@coerce') ?
-         $merged->{'@coerce'} : new stdClass();
-      $c2 = property_exists($copy, '@coerce') ?
-         $copy->{'@coerce'} : new stdClass();
-      unset($merged->{'@coerce'});
-      unset($copy->{'@coerce'});
-   }
-
-   // merge contexts
-   foreach($copy as $key => $value)
-   {
-      $merged->$key = $value;
-   }
-
-   // special-merge @coerce
-   if($coerceExists)
-   {
-      foreach($c1 as $type => $p1)
+      // if the new context contains any IRIs that are in the merged context,
+      // remove them from the merged context, they will be overwritten
+      foreach($ctx2 as $key => $value)
       {
-         // append existing-type properties that don't already exist
-         if(property_exists($c2, $type))
+         // ignore special keys starting with '@'
+         if(strpos($key, '@') !== 0)
          {
-            $p2 = $c2->$type;
-
-            // normalize props in c2 to array for single-code-path iterating
-            if(!is_array($p2))
+            foreach($merged as $mkey => $mvalue)
             {
-               $p2 = array($p2);
-            }
-
-            // add unique properties from p2 to p1
-            foreach($p2 as $i => $p)
-            {
-               if((!is_array($p1) and $p1 !== $p) or
-                  (is_array($p1) and array_search($p, $p1) === false))
+               if($mvalue === $value)
                {
-                  if(is_array($p1))
-                  {
-                     $p1[] = $p;
-                  }
-                  else
-                  {
-                     $p1 = array($p1, $p);
-                  }
+                  // FIXME: update related coerce rules
+                  unset($merged->$mkey);
+                  break;
                }
             }
-
-            $c1->$type = $p1;
          }
       }
 
-      // add new types from new @coerce
-      foreach($c2 as $type => $value)
+      // merge contexts
+      foreach($ctx2 as $key => $value)
       {
-         if(!property_exists($c1, $type))
-         {
-            $c1->$type = $value;
-         }
+         $merged->$key = _clone($value);
       }
-
-      // ensure there are no property duplicates in @coerce
-      $unique = new stdClass();
-      $dups = array();
-      foreach($c1 as $type => $p)
-      {
-         if(is_string($p))
-         {
-            $p = array($p);
-         }
-         foreach($p as $v)
-         {
-            if(!property_exists($unique, $v))
-            {
-               $unique->$v = true;
-            }
-            else if(!in_array($v, $dups))
-            {
-               $dups[] = $v;
-            }
-         }
-      }
-
-      if(count($dups)> 0)
-      {
-         throw new Exception(
-            'Invalid type coercion specification. More than one ' .
-            'type specified for at least one property. duplicates=' .
-            print_r(dups, true));
-      }
-
-      $merged->{'@coerce'} = $c1;
    }
 
    return $merged;
@@ -244,7 +153,7 @@ function jsonld_merge_contexts($ctx1, $ctx2)
 
 /**
  * Expands a term into an absolute IRI. The term may be a regular term, a
- * CURIE, a relative IRI, or an absolute IRI. In any case, the associated
+ * prefix, a relative IRI, or an absolute IRI. In any case, the associated
  * absolute IRI will be returned.
  *
  * @param ctx the context to use.
@@ -258,14 +167,14 @@ function jsonld_expand_term($ctx, $term)
 }
 
 /**
- * Compacts an IRI into a term or CURIE if it can be. IRIs will not be
+ * Compacts an IRI into a term or prefix if it can be. IRIs will not be
  * compacted to relative IRIs if they match the given context's default
  * vocabulary.
  *
  * @param ctx the context to use.
  * @param iri the IRI to compact.
  *
- * @return the compacted IRI as a term or CURIE or the original IRI.
+ * @return the compacted IRI as a term or prefix or the original IRI.
  */
 function jsonld_compact_iri($ctx, $iri)
 {
@@ -290,13 +199,29 @@ function jsonld_frame($input, $frame, $options=null)
 
    // save frame context
    $ctx = null;
-   if(property_exists($frame, '@context'))
+   if(is_object($frame) and property_exists($frame, '@context'))
    {
       $ctx = _clone($frame->{'@context'});
-   }
 
-   // remove context from frame
-   $frame = jsonld_expand($frame);
+      // remove context from frame
+      $frame = jsonld_expand($frame);
+   }
+   else if(is_array($frame))
+   {
+      // save first context in the array
+      if(count($frame) > 0 and property_exists($frame[0], '@context'))
+      {
+         $ctx = _clone($frame[0]->{'@context'});
+      }
+
+      // expand all elements in the array
+      $tmp = array();
+      foreach($frame as $f)
+      {
+         $tmp[] = jsonld_expand($f);
+      }
+      $frame = $tmp;
+   }
 
    // create framing options
    // TODO: merge in options from function parameter
@@ -310,165 +235,178 @@ function jsonld_frame($input, $frame, $options=null)
    $subjects = new stdClass();
    foreach($input as $i)
    {
-      $subjects->{$i->{__S}->{'@iri'}} = $i;
+      $subjects->{$i->{'@id'}} = $i;
    }
 
    // frame input
-   $rval = _frame($subjects, $input, $frame, new stdClass(), $options);
+   $rval = _frame(
+      $subjects, $input, $frame, new stdClass(), false, null, null, $options);
 
    // apply context
    if($ctx !== null and $rval !== null)
    {
-      $rval = jsonld_compact($ctx, $rval);
-   }
-
-   return $rval;
-}
-
-/**
- * Compacts an IRI into a term or CURIE if it can be. IRIs will not be
- * compacted to relative IRIs if they match the given context's default
- * vocabulary.
- *
- * @param ctx the context to use.
- * @param iri the IRI to compact.
- * @param usedCtx a context to update if a value was used from "ctx".
- *
- * @return the compacted IRI as a term or CURIE or the original IRI.
- */
-function _compactIri($ctx, $iri, $usedCtx)
-{
-   $rval = null;
-
-   // check the context for a term that could shorten the IRI
-   // (give preference to terms over CURIEs)
-   foreach($ctx as $key => $value)
-   {
-      // skip special context keys (start with '@')
-      if(strlen($key) > 0 and $key[0] !== '@')
+      // preserve top-level array by compacting individual entries
+      if(is_array($rval))
       {
-         // compact to a term
-         if($iri === $ctx->$key)
+         $tmp = $rval;
+         $rval = array();
+         foreach($tmp as $value)
          {
-            $rval = $key;
-            if($usedCtx !== null)
-            {
-               $usedCtx->$key = $ctx->$key;
-            }
-            break;
+            $rval[] = jsonld_compact($ctx, $value);
          }
       }
-   }
-
-   // term not found, if term is rdf type, use built-in keyword
-   if($rval === null and $iri === JSONLD_RDF_TYPE)
-   {
-      $rval = __T;
-   }
-
-   // term not found, check the context for a CURIE prefix
-   if($rval === null)
-   {
-      foreach($ctx as $key => $value)
-      {
-         // skip special context keys (start with '@')
-         if(strlen($key) > 0 and $key[0] !== '@')
-         {
-            // see if IRI begins with the next IRI from the context
-            $ctxIri = $ctx->$key;
-            $idx = strpos($iri, $ctxIri);
-
-            // compact to a CURIE
-            if($idx === 0 and strlen($iri) > strlen($ctxIri))
-            {
-               $rval = $key . ':' . substr($iri, strlen($ctxIri));
-               if($usedCtx !== null)
-               {
-                  $usedCtx->$key = $ctxIri;
-               }
-               break;
-            }
-         }
-      }
-   }
-
-   // could not compact IRI
-   if($rval === null)
-   {
-      $rval = $iri;
-   }
-
-   return $rval;
-}
-
-/**
- * Expands a term into an absolute IRI. The term may be a regular term, a
- * CURIE, a relative IRI, or an absolute IRI. In any case, the associated
- * absolute IRI will be returned.
- *
- * @param ctx the context to use.
- * @param term the term to expand.
- * @param usedCtx a context to update if a value was used from "ctx".
- *
- * @return the expanded term as an absolute IRI.
- */
-function _expandTerm($ctx, $term, $usedCtx)
-{
-   $rval;
-
-   // 1. If the property has a colon, then it is a CURIE or an absolute IRI:
-   $idx = strpos($term, ':');
-   if($idx !== false)
-   {
-      // get the potential CURIE prefix
-      $prefix = substr($term, 0, $idx);
-
-      // 1.1. See if the prefix is in the context:
-      if(property_exists($ctx, $prefix))
-      {
-         // prefix found, expand property to absolute IRI
-         $rval = $ctx->$prefix . substr($term, $idx + 1);
-         if($usedCtx !== null)
-         {
-            $usedCtx->$prefix = $ctx->$prefix;
-         }
-      }
-      // 1.2. Prefix is not in context, property is already an absolute IRI:
       else
       {
-         $rval = $term;
+         $rval = jsonld_compact($ctx, $rval);
       }
    }
-   // 2. If the property is in the context, then it's a term.
-   else if(property_exists($ctx, $term))
+
+   return $rval;
+}
+
+/**
+ * Resolves external @context URLs. Every @context URL in the given JSON-LD
+ * object is resolved using the given URL-resolver function. Once all of
+ * the @contexts have been resolved, the method will return. If an error
+ * is encountered, an exception will be thrown.
+ *
+ * @param input the JSON-LD input object (or array).
+ * @param resolver the resolver method that takes a URL and returns a JSON-LD
+ *           serialized @context or throws an exception.
+ *
+ * @return the fully-resolved JSON-LD output (object or array).
+ */
+function jsonld_resolve($input, $resolver)
+{
+   // find all @context URLs
+   $urls = new ArrayObject();
+   _findUrls($input, $urls, false);
+
+   // resolve all URLs
+   foreach($urls as $url => $value)
    {
-      $rval = $ctx->$term;
-      if($usedCtx !== null)
+      $result = call_user_func($resolver, $url);
+      if(!is_string($result))
       {
-         $usedCtx->$term = $rval;
+         // already deserialized
+         $urls[$url] = $result->{'@context'};
       }
-   }
-   // 3. The property is the special-case subject.
-   else if($term === __S)
-   {
-      $rval = __S;
-   }
-   // 4. The property is the special-case rdf type.
-   else if($term === __T)
-   {
-      $rval = JSONLD_RDF_TYPE;
-   }
-   // 5. The property is a relative IRI, prepend the default vocab.
-   else
-   {
-      $rval = $term;
-      if(property_exists($ctx, '@vocab'))
+      else
       {
-         $rval = $ctx->{'@vocab'} . $rval;
-         if($usedCtx !== null)
+         // deserialize JSON
+         $tmp = json_decode($result);
+         if($tmp === null)
          {
-            $usedCtx->{'@vocab'} = $ctx->{'@vocab'};
+            throw new Exception(
+               'Could not resolve @context URL ("$url"), ' .
+               'malformed JSON detected.');
          }
+         $urls[$url] = $tmp->{'@context'};
+      }
+   }
+
+   // replace @context URLs in input
+   _findUrls($input, $urls, true);
+
+   return $input;
+}
+
+/**
+ * Finds all of the @context URLs in the given input and replaces them
+ * if requested by their associated values in the given URL map.
+ *
+ * @param input the JSON-LD input object.
+ * @param urls the URLs ArrayObject.
+ * @param replace true to replace, false not to.
+ */
+function _findUrls($input, $urls, $replace)
+{
+   if(is_array($input))
+   {
+      foreach($input as $v)
+      {
+         _findUrls($v);
+      }
+   }
+   else if(is_object($input))
+   {
+      foreach($input as $key => $value)
+      {
+         if($key === '@context')
+         {
+            // @context is an array that might contain URLs
+            if(is_array($value))
+            {
+               foreach($value as $idx => $v)
+               {
+                  if(is_string($v))
+                  {
+                     // replace w/resolved @context if appropriate
+                     if($replace)
+                     {
+                        $input->{$key}[$idx] = $urls[$v];
+                     }
+                     // unresolved @context found
+                     else
+                     {
+                        $urls[$v] = new stdClass();
+                     }
+                  }
+               }
+            }
+            else if(is_string($value))
+            {
+               // replace w/resolved @context if appropriate
+               if($replace)
+               {
+                  $input->$key = $urls[$value];
+               }
+               // unresolved @context found
+               else
+               {
+                  $urls[$value] = new stdClass();
+               }
+            }
+         }
+      }
+   }
+}
+
+/**
+ * Gets the keywords from a context.
+ *
+ * @param ctx the context.
+ *
+ * @return the keywords.
+ */
+function _getKeywords($ctx)
+{
+   // TODO: reduce calls to this function by caching keywords in processor
+   // state
+
+   $rval = (object)array(
+      '@id' => '@id',
+      '@language' => '@language',
+      '@value' => '@value',
+      '@type' => '@type'
+   );
+
+   if($ctx)
+   {
+      // gather keyword aliases from context
+      $keywords = new stdClass();
+      foreach($ctx as $key => $value)
+      {
+         if(is_string($value) and property_exists($rval, $value))
+         {
+            $keywords->{$value} = $key;
+         }
+      }
+
+      // overwrite keywords
+      foreach($keywords as $key => $value)
+      {
+         $rval->$key = $value;
       }
    }
 
@@ -541,247 +479,172 @@ function _clone($value)
 }
 
 /**
- * Gets the coerce type for the given property.
+ * Gets the iri associated with a term.
+ *
+ * @param ctx the context.
+ * @param term the term.
+ *
+ * @return the iri or NULL.
+ */
+function _getTermIri($ctx, $term)
+{
+   $rval = null;
+   if(property_exists($ctx, $term))
+   {
+      if(is_string($ctx->$term))
+      {
+         $rval = $ctx->$term;
+      }
+      else if(is_object($ctx->$term) and property_exists($ctx->$term, '@id'))
+      {
+         $rval = $ctx->$term->{'@id'};
+      }
+   }
+   return $rval;
+}
+
+/**
+ * Compacts an IRI into a term or prefix if it can be. IRIs will not be
+ * compacted to relative IRIs if they match the given context's default
+ * vocabulary.
  *
  * @param ctx the context to use.
- * @param property the property to get the coerced type for.
+ * @param iri the IRI to compact.
  * @param usedCtx a context to update if a value was used from "ctx".
  *
- * @return the coerce type, null for none.
+ * @return the compacted IRI as a term or prefix or the original IRI.
  */
-function _getCoerceType($ctx, $property, $usedCtx)
+function _compactIri($ctx, $iri, $usedCtx)
 {
    $rval = null;
 
-   // get expanded property
-   $p = _expandTerm($ctx, $property, null);
-
-   // built-in type coercion JSON-LD-isms
-   if($p === __S or $p === JSONLD_RDF_TYPE)
+   // check the context for a term that could shorten the IRI
+   // (give preference to terms over prefixes)
+   foreach($ctx as $key => $value)
    {
-      $rval = JSONLD_XSD_ANY_URI;
-   }
-   // check type coercion for property
-   else if(property_exists($ctx, '@coerce'))
-   {
-      // force compacted property
-      $p = _compactIri($ctx, $p, null);
-
-      foreach($ctx->{'@coerce'} as $type => $props)
+      // skip special context keys (start with '@')
+      if(strlen($key) > 0 and $key[0] !== '@')
       {
-         // get coerced properties (normalize to an array)
-         if(!is_array($props))
+         // compact to a term
+         if($iri === _getTermIri($ctx, $key))
          {
-            $props = array($props);
-         }
-
-         // look for the property in the array
-         foreach($props as $prop)
-         {
-            // property found
-            if($prop === $p)
+            $rval = $key;
+            if($usedCtx !== null)
             {
-               $rval = _expandTerm($ctx, $type, $usedCtx);
-               if($usedCtx !== null)
-               {
-                  if(!property_exists($usedCtx, '@coerce'))
-                  {
-                     $usedCtx->{'@coerce'} = new stdClass();
-                  }
+               $usedCtx->$key = _clone($ctx->$key);
+            }
+            break;
+         }
+      }
+   }
 
-                  if(!property_exists($usedCtx->{'@coerce'}, $type))
+   // term not found, if term is keyword, use alias
+   if($rval === null)
+   {
+      $keywords = _getKeywords($ctx);
+      if(property_exists($keywords, $iri))
+      {
+         $rval = $keywords->{$iri};
+         if($rval !== $iri and $usedCtx !== null)
+         {
+            $usedCtx->$rval = $iri;
+         }
+      }
+   }
+
+   // term not found, check the context for a prefix
+   if($rval === null)
+   {
+      foreach($ctx as $key => $value)
+      {
+         // skip special context keys (start with '@')
+         if(strlen($key) > 0 and $key[0] !== '@')
+         {
+            // see if IRI begins with the next IRI from the context
+            $ctxIri = _getTermIri($ctx, $key);
+            if($ctxIri !== null)
+            {
+               $idx = strpos($iri, $ctxIri);
+
+               // compact to a prefix
+               if($idx === 0 and strlen($iri) > strlen($ctxIri))
+               {
+                  $rval = $key . ':' . substr($iri, strlen($ctxIri));
+                  if($usedCtx !== null)
                   {
-                     $usedCtx->{'@coerce'}->$type = $p;
+                     $usedCtx->$key = _clone($ctx->$key);
                   }
-                  else
-                  {
-                     $c = $usedCtx->{'@coerce'}->$type;
-                     if(is_array($c) and in_array($p, $c) or
-                        is_string($c) and $c !== $p)
-                     {
-                        _setProperty($usedCtx->{'@coerce'}, $type, $p);
-                     }
-                  }
+                  break;
                }
-               break;
             }
          }
       }
+   }
+
+   // could not compact IRI
+   if($rval === null)
+   {
+      $rval = $iri;
    }
 
    return $rval;
 }
 
 /**
- * Recursively compacts a value. This method will compact IRIs to CURIEs or
- * terms and do reverse type coercion to compact a value.
+ * Expands a term into an absolute IRI. The term may be a regular term, a
+ * prefix, a relative IRI, or an absolute IRI. In any case, the associated
+ * absolute IRI will be returned.
  *
  * @param ctx the context to use.
- * @param property the property that points to the value, NULL for none.
- * @param value the value to compact.
+ * @param term the term to expand.
  * @param usedCtx a context to update if a value was used from "ctx".
  *
- * @return the compacted value.
+ * @return the expanded term as an absolute IRI.
  */
-function _compact($ctx, $property, $value, $usedCtx)
+function _expandTerm($ctx, $term, $usedCtx)
 {
-   $rval;
+   $rval = $term;
 
-   if($value === null)
+   // get JSON-LD keywords
+   $keywords = _getKeywords($ctx);
+
+   // 1. If the property has a colon, it is a prefix or an absolute IRI:
+   $idx = strpos($term, ':');
+   if($idx !== false)
    {
-      // return null, but check coerce type to add to usedCtx
-      $rval = null;
-      _getCoerceType($ctx, $property, $usedCtx);
-   }
-   else if(is_array($value))
-   {
-      // recursively add compacted values to array
-      $rval = array();
-      foreach($value as $v)
+      // get the potential prefix
+      $prefix = substr($term, 0, $idx);
+
+      // expand term if prefix is in context, otherwise leave it be
+      if(property_exists($ctx, $prefix))
       {
-         $rval[] = _compact($ctx, $property, $v, $usedCtx);
-      }
-   }
-   // graph literal/disjoint graph
-   else if(
-      is_object($value) and
-      property_exists($value, __S) and is_array($value->{__S}))
-   {
-      $rval = new stdClass();
-      $rval->{__S} = _compact($ctx, $property, $value->{__S}, $usedCtx);
-   }
-   // value has sub-properties if it doesn't define a literal or IRI value
-   else if(
-      is_object($value) and
-      !property_exists($value, '@literal') and
-      !property_exists($value, '@iri'))
-   {
-      // recursively handle sub-properties that aren't a sub-context
-      $rval = new stdClass();
-      foreach($value as $key => $v)
-      {
-         if($v !== '@context')
+         // prefix found, expand property to absolute IRI
+         $iri = _getTermIri($ctx, $prefix);
+         $rval = $iri . substr($term, $idx + 1);
+         if($usedCtx !== null)
          {
-            // set object to compacted property, only overwrite existing
-            // properties if the property actually compacted
-            $p = _compactIri($ctx, $key, $usedCtx);
-            if($p !== $key or !property_exists($rval, $p))
-            {
-               $rval->$p = _compact($ctx, $key, $v, $usedCtx);
-            }
+            $usedCtx->$prefix = _clone($ctx->$prefix);
          }
       }
    }
+   // 2. If the property is in the context, then it's a term.
+   else if(property_exists($ctx, $term))
+   {
+      $rval = _getTermIri($ctx, $term);
+      if($usedCtx !== null)
+      {
+         $usedCtx->$term = _clone($ctx->$term);
+      }
+   }
+   // 3. The property is a keyword.
    else
    {
-      // get coerce type
-      $coerce = _getCoerceType($ctx, $property, $usedCtx);
-
-      // get type from value, to ensure coercion is valid
-      $type = null;
-      if(is_object($value))
+      foreach($keywords as $key => $value)
       {
-         // type coercion can only occur if language is not specified
-         if(!property_exists($value, '@language'))
+         if($term === $value)
          {
-            // datatype must match coerce type if specified
-            if(property_exists($value, '@datatype'))
-            {
-               $type = $value->{'@datatype'};
-            }
-            // datatype is IRI
-            else if(property_exists($value, '@iri'))
-            {
-               $type = JSONLD_XSD_ANY_URI;
-            }
-            // can be coerced to any type
-            else
-            {
-               $type = $coerce;
-            }
-         }
-      }
-      // type can be coerced to anything
-      else if(is_string($value))
-      {
-         $type = $coerce;
-      }
-
-      // types that can be auto-coerced from a JSON-builtin
-      if($coerce === null and
-         ($type === JSONLD_XSD_BOOLEAN or $type === JSONLD_XSD_INTEGER or
-         $type === JSONLD_XSD_DOUBLE))
-      {
-         $coerce = $type;
-      }
-
-      // do reverse type-coercion
-      if($coerce !== null)
-      {
-         // type is only null if a language was specified, which is an error
-         // if type coercion is specified
-         if($type === null)
-         {
-            throw new Exception(
-               'Cannot coerce type when a language is specified. ' .
-               'The language information would be lost.');
-         }
-         // if the value type does not match the coerce type, it is an error
-         else if($type !== $coerce)
-         {
-            throw new Exception(
-               'Cannot coerce type because the datatype does not match.');
-         }
-         // do reverse type-coercion
-         else
-         {
-            if(is_object($value))
-            {
-               if(property_exists($value, '@iri'))
-               {
-                  $rval = $value->{'@iri'};
-               }
-               else if(property_exists($value, '@literal'))
-               {
-                  $rval = $value->{'@literal'};
-               }
-            }
-            else
-            {
-               $rval = $value;
-            }
-
-            // do basic JSON types conversion
-            if($coerce === JSONLD_XSD_BOOLEAN)
-            {
-               $rval = ($rval === 'true' or $rval != 0);
-            }
-            else if($coerce === JSONLD_XSD_DOUBLE)
-            {
-               $rval = floatval($rval);
-            }
-            else if($coerce === JSONLD_XSD_INTEGER)
-            {
-               $rval = intval($rval);
-            }
-         }
-      }
-      // no type-coercion, just copy value
-      else
-      {
-         $rval = _clone($value);
-      }
-
-      // compact IRI
-      if($type === JSONLD_XSD_ANY_URI)
-      {
-         if(is_object($rval))
-         {
-            $rval->{'@iri'} = _compactIri($ctx, $rval->{'@iri'}, $usedCtx);
-         }
-         else
-         {
-            $rval = _compactIri($ctx, $rval, $usedCtx);
+            $rval = $key;
+            break;
          }
       }
    }
@@ -790,135 +653,45 @@ function _compact($ctx, $property, $value, $usedCtx)
 }
 
 /**
- * Recursively expands a value using the given context. Any context in
- * the value will be removed.
+ * Gets whether or not a value is a reference to a subject (or a subject with
+ * no properties).
  *
- * @param ctx the context.
- * @param property the property that points to the value, NULL for none.
- * @param value the value to expand.
- * @param expandSubjects true to expand subjects (normalize), false not to.
+ * @param value the value to check.
  *
- * @return the expanded value.
+ * @return true if the value is a reference to a subject, false if not.
  */
-function _expand($ctx, $property, $value, $expandSubjects)
+function _isReference($value)
 {
-   $rval;
+   // Note: A value is a reference to a subject if all of these hold true:
+   // 1. It is an Object.
+   // 2. It is has an @id key.
+   // 3. It has only 1 key.
+   return ($value !== null and
+      is_object($value) and
+      property_exists($value, '@id') and
+      count(get_object_vars($value)) === 1);
+};
 
-   // TODO: add data format error detection?
+/**
+ * Gets whether or not a value is a subject with properties.
+ *
+ * @param value the value to check.
+ *
+ * @return true if the value is a subject with properties, false if not.
+ */
+function _isSubject($value)
+{
+   $rval = false;
 
-   // value is null, nothing to expand
-   if($value === null)
+   // Note: A value is a subject if all of these hold true:
+   // 1. It is an Object.
+   // 2. It is not a literal (@value).
+   // 3. It has more than 1 key OR any existing key is not '@id'.
+   if($value !== null and is_object($value) and
+      !property_exists($value, '@value'))
    {
-      $rval = null;
-   }
-   // if no property is specified and the value is a string (this means the
-   // value is a property itself), expand to an IRI
-   else if($property === null and is_string($value))
-   {
-      $rval = _expandTerm($ctx, $value, null);
-   }
-   else if(is_array($value))
-   {
-      // recursively add expanded values to array
-      $rval = array();
-      foreach($value as $v)
-      {
-         $rval[] = _expand($ctx, $property, $v, $expandSubjects);
-      }
-   }
-   else if(is_object($value))
-   {
-      // value has sub-properties if it doesn't define a literal or IRI value
-      if(!(property_exists($value, '@literal') or
-         property_exists($value, '@iri')))
-      {
-         // if value has a context, use it
-         if(property_exists($value, '@context'))
-         {
-            $ctx = jsonld_merge_contexts($ctx, $value->{'@context'});
-         }
-
-         // recursively handle sub-properties that aren't a sub-context
-         $rval = new stdClass();
-         foreach($value as $key => $v)
-         {
-            // preserve frame keywords
-            if($key === '@embed' or $key === '@explicit' or
-               $key === '@default' or $key === '@omitDefault')
-            {
-               _setProperty($rval, $key, _clone($v));
-            }
-            else if($key !== '@context')
-            {
-               // set object to expanded property
-               _setProperty(
-                  $rval, _expandTerm($ctx, $key, null),
-                  _expand($ctx, $key, $v, $expandSubjects));
-            }
-         }
-      }
-      // value is already expanded
-      else
-      {
-         $rval = _clone($value);
-      }
-   }
-   else
-   {
-      // do type coercion
-      $coerce = _getCoerceType($ctx, $property, null);
-
-      // automatic coercion for basic JSON types
-      if($coerce === null and !is_string($value) and
-         (is_numeric($value) or is_bool($value)))
-      {
-         if(is_bool($value))
-         {
-            $coerce = JSONLD_XSD_BOOLEAN;
-         }
-         else if(is_int($value))
-         {
-            $coerce = JSONLD_XSD_INTEGER;
-         }
-         else
-         {
-            $coerce = JSONLD_XSD_DOUBLE;
-         }
-      }
-
-      // coerce to appropriate datatype, only expand subjects if requested
-      if($coerce !== null and ($property !== __S or $expandSubjects))
-      {
-         $rval = new stdClass();
-
-         // expand IRI
-         if($coerce === JSONLD_XSD_ANY_URI)
-         {
-            $rval->{'@iri'} = _expandTerm($ctx, $value, null);
-         }
-         // other datatype
-         else
-         {
-            $rval->{'@datatype'} = $coerce;
-            if($coerce === JSONLD_XSD_DOUBLE)
-            {
-               // do special JSON-LD double format
-               $value = preg_replace(
-                  '/(e(?:\+|-))([0-9])$/', '${1}0${2}',
-                  sprintf('%1.6e', $value));
-            }
-            else if($coerce === JSONLD_XSD_BOOLEAN)
-            {
-               $value = $value ? 'true' : 'false';
-            }
-            $rval->{'@literal'} = '' . $value;
-         }
-      }
-      // nothing to coerce
-      else
-      {
-         $rval = '' . $value;
-      }
+      $keyCount = count(get_object_vars($value));
+      $rval = ($keyCount > 1 or !property_exists($value, '@id'));
    }
 
    return $rval;
@@ -933,18 +706,16 @@ function _isNamedBlankNode($v)
 {
    // look for "_:" at the beginning of the subject
    return (
-      is_object($v) and property_exists($v, __S) and
-      property_exists($v->{__S}, '@iri') and
-      _isBlankNodeIri($v->{__S}->{'@iri'}));
+      is_object($v) and property_exists($v, '@id') and
+      _isBlankNodeIri($v->{'@id'}));
 }
 
 function _isBlankNode($v)
 {
-   // look for no subject or named blank node
+   // look for a subject with no ID or a blank node ID
    return (
-      is_object($v) and
-      !(property_exists($v, '@iri') or property_exists($v, '@literal')) and
-      (!property_exists($v, __S) or _isNamedBlankNode($v)));
+      _isSubject($v) and
+      (!property_exists($v, '@id') or _isNamedBlankNode($v)));
 }
 
 /**
@@ -1036,21 +807,21 @@ function _compareObjects($o1, $o2)
    }
    else
    {
-      $rval = _compareObjectKeys($o1, $o2, '@literal');
+      $rval = _compareObjectKeys($o1, $o2, '@value');
       if($rval === 0)
       {
-         if(property_exists($o1, '@literal'))
+         if(property_exists($o1, '@value'))
          {
-            $rval = _compareObjectKeys($o1, $o2, '@datatype');
+            $rval = _compareObjectKeys($o1, $o2, '@type');
             if($rval === 0)
             {
                $rval = _compareObjectKeys($o1, $o2, '@language');
             }
          }
-         // both are '@iri' objects
+         // both are '@id' objects
          else
          {
-            $rval = _compare($o1->{'@iri'}, $o2->{'@iri'});
+            $rval = _compare($o1->{'@id'}, $o2->{'@id'});
          }
       }
    }
@@ -1067,8 +838,7 @@ function _compareObjects($o1, $o2)
  */
 function _filterBlankNodes($e)
 {
-   return (is_string($e) or
-      !(property_exists($e, '@iri') and _isBlankNodeIri($e->{'@iri'})));
+   return !_isNamedBlankNode($e);
 }
 
 /**
@@ -1086,58 +856,62 @@ function _compareBlankNodeObjects($a, $b)
    /*
    3. For each property, compare sorted object values.
    3.1. The bnode with fewer objects is first.
-   3.2. For each object value, compare only literals and non-bnodes.
+   3.2. For each object value, compare only literals (@values) and non-bnodes.
    3.2.1.  The bnode with fewer non-bnodes is first.
    3.2.2. The bnode with a string object is first.
    3.2.3. The bnode with the alphabetically-first string is first.
-   3.2.4. The bnode with a @literal is first.
-   3.2.5. The bnode with the alphabetically-first @literal is first.
-   3.2.6. The bnode with the alphabetically-first @datatype is first.
+   3.2.4. The bnode with a @value is first.
+   3.2.5. The bnode with the alphabetically-first @value is first.
+   3.2.6. The bnode with the alphabetically-first @type is first.
    3.2.7. The bnode with a @language is first.
    3.2.8. The bnode with the alphabetically-first @language is first.
-   3.2.9. The bnode with the alphabetically-first @iri is first.
+   3.2.9. The bnode with the alphabetically-first @id is first.
    */
 
    foreach($a as $p => $value)
    {
-      // step #3.1
-      $lenA = is_array($a->$p) ? count($a->$p) : 1;
-      $lenB = is_array($b->$p) ? count($b->$p) : 1;
-      $rval = _compare($lenA, $lenB);
-
-      // step #3.2.1
-      if($rval === 0)
+      // skip IDs (IRIs)
+      if($p !== '@id')
       {
-         // normalize objects to an array
-         $objsA = $a->$p;
-         $objsB = $b->$p;
-         if(!is_array($objsA))
+         // step #3.1
+         $lenA = is_array($a->$p) ? count($a->$p) : 1;
+         $lenB = is_array($b->$p) ? count($b->$p) : 1;
+         $rval = _compare($lenA, $lenB);
+
+         // step #3.2.1
+         if($rval === 0)
          {
-            $objsA = array($objsA);
-            $objsB = array($objsB);
+            // normalize objects to an array
+            $objsA = $a->$p;
+            $objsB = $b->$p;
+            if(!is_array($objsA))
+            {
+               $objsA = array($objsA);
+               $objsB = array($objsB);
+            }
+
+            // compare non-bnodes (remove bnodes from comparison)
+            $objsA = array_filter($objsA, '_filterBlankNodes');
+            $objsB = array_filter($objsB, '_filterBlankNodes');
+            $objsALen = count($objsA);
+            $rval = _compare($objsALen, count($objsB));
          }
 
-         // filter non-bnodes (remove bnodes from comparison)
-         $objsA = array_filter($objsA, '_filterBlankNodes');
-         $objsB = array_filter($objsB, '_filterBlankNodes');
-         $objsALen = count($objsA);
-         $rval = _compare($objsALen, count($objsB));
-      }
-
-      // steps #3.2.2-3.2.9
-      if($rval === 0)
-      {
-         usort($objsA, '_compareObjects');
-         usort($objsB, '_compareObjects');
-         for($i = 0; $i < $objsALen and $rval === 0; ++$i)
+         // steps #3.2.2-3.2.9
+         if($rval === 0)
          {
-            $rval = _compareObjects($objsA[$i], $objsB[$i]);
+            usort($objsA, '_compareObjects');
+            usort($objsB, '_compareObjects');
+            for($i = 0; $i < $objsALen and $rval === 0; ++$i)
+            {
+               $rval = _compareObjects($objsA[$i], $objsB[$i]);
+            }
          }
-      }
 
-      if($rval !== 0)
-      {
-         break;
+         if($rval !== 0)
+         {
+            break;
+         }
       }
    }
 
@@ -1195,17 +969,17 @@ function _collectSubjects($input, $subjects, $bnodes)
    }
    else if(is_object($input))
    {
-      if(property_exists($input, __S))
+      if(property_exists($input, '@id'))
       {
-         // graph literal
-         if(is_array($input->{__S}))
+         // graph literal/disjoint graph
+         if(is_array($input->{'@id'}))
          {
-            _collectSubjects($input->{__S}, $subjects, $bnodes);
+            _collectSubjects($input->{'@id'}, $subjects, $bnodes);
          }
          // named subject
-         else
+         else if(_isSubject($input))
          {
-            $subjects->{$input->{__S}->{'@iri'}} = $input;
+            $subjects->{$input->{'@id'}} = $input;
          }
       }
       // unnamed blank node
@@ -1223,19 +997,18 @@ function _collectSubjects($input, $subjects, $bnodes)
 }
 
 /**
- * Filters duplicate IRIs.
+ * Filters duplicate objects.
  */
-class DuplicateIriFilter
+class DuplicateFilter
 {
-   public function __construct($iri)
+   public function __construct($obj)
    {
-      $this->iri = $iri;
+      $this->obj = $obj;
    }
 
    public function filter($e)
    {
-      return (is_object($e) and property_exists($e, '@iri') and
-         $e->{'@iri'} === $this->iri);
+      return (_compareObjects($e, $this->obj) === 0);
    }
 }
 
@@ -1267,8 +1040,13 @@ function _flatten($parent, $parentProperty, $value, $subjects)
    }
    else if(is_object($value))
    {
+      // already-expanded value or special-case reference-only @type
+      if(property_exists($value, '@value') or $parentProperty === '@type')
+      {
+         $flattened = _clone($value);
+      }
       // graph literal/disjoint graph
-      if(property_exists($value, __S) and is_array($value->{__S}))
+      else if(is_array($value->{'@id'}))
       {
          // cannot flatten embedded graph literals
          if($parent !== null)
@@ -1277,43 +1055,35 @@ function _flatten($parent, $parentProperty, $value, $subjects)
          }
 
          // top-level graph literal
-         foreach($value->{__S} as $k => $v)
+         foreach($value->{'@id'} as $k => $v)
          {
             _flatten($parent, $parentProperty, $v, $subjects);
          }
       }
-      // already-expanded value
-      else if(
-         property_exists($value, '@literal') or
-         property_exists($value, '@iri'))
-      {
-         $flattened = _clone($value);
-      }
-      // subject
+      // regular subject
       else
       {
          // create or fetch existing subject
-         if(property_exists($subjects, $value->{__S}->{'@iri'}))
+         if(property_exists($subjects, $value->{'@id'}))
          {
-            // FIXME: __S might be a graph literal (as {})
-            $subject = $subjects->{$value->{__S}->{'@iri'}};
+            // FIXME: '@id' might be a graph literal (as {})
+            $subject = $subjects->{$value->{'@id'}};
          }
          else
          {
+            // FIXME: '@id' might be a graph literal (as {})
             $subject = new stdClass();
-            if(property_exists($value, __S))
-            {
-               // FIXME: __S might be a graph literal (as {})
-               $subjects->{$value->{__S}->{'@iri'}} = $subject;
-            }
+            $subject->{'@id'} = $value->{'@id'};
+            $subjects->{$value->{'@id'}} = $subject;
          }
-         $flattened = $subject;
+         $flattened = new stdClass();
+         $flattened->{'@id'} = $subject->{'@id'};
 
          // flatten embeds
          foreach($value as $key => $v)
          {
-            // drop null values
-            if($v !== null)
+            // drop null values, skip @id (it is already set above)
+            if($v !== null and $key !== '@id')
             {
                if(property_exists($subject, $key))
                {
@@ -1331,7 +1101,7 @@ function _flatten($parent, $parentProperty, $value, $subjects)
                   $subject->$key = new ArrayObject();
                }
 
-               _flatten($subject->$key, null, $value->$key, $subjects);
+               _flatten($subject->$key, $key, $value->$key, $subjects);
                $subject->$key = (array)$subject->$key;
                if(count($subject->$key) === 1)
                {
@@ -1352,25 +1122,12 @@ function _flatten($parent, $parentProperty, $value, $subjects)
    // add flattened value to parent
    if($flattened !== null and $parent !== null)
    {
-      // remove top-level __s for subjects
-      // 'http://mypredicate': {'@subject': {'@iri': 'http://mysubject'}}
-      // becomes
-      // 'http://mypredicate': {'@iri': 'http://mysubject'}
-      if(is_object($flattened) and property_exists($flattened, __S))
-      {
-         $flattened = $flattened->{__S};
-      }
-
       if($parent instanceof ArrayObject)
       {
          // do not add duplicate IRIs for the same property
-         $duplicate = false;
-         if(is_object($flattened) and property_exists($flattened, '@iri'))
-         {
-            $duplicate = count(array_filter(
-               (array)$parent, array(
-                  new DuplicateIriFilter($flattened->{'@iri'}), 'filter'))) > 0;
-         }
+         $duplicate = count(array_filter(
+            (array)$parent, array(
+               new DuplicateFilter($flattened), 'filter'))) > 0;
          if(!$duplicate)
          {
             $parent[] = $flattened;
@@ -1381,7 +1138,7 @@ function _flatten($parent, $parentProperty, $value, $subjects)
          $parent->$parentProperty = $flattened;
       }
    }
-};
+}
 
 /**
  * A MappingBuilder is used to build a mapping of existing blank node names
@@ -1502,7 +1259,7 @@ function _compareSerializations($s1, $s2)
  */
 function _compareIris($a, $b)
 {
-   return _compare($a->{__S}->{'@iri'}, $b->{__S}->{'@iri'});
+   return _compare($a->{'@id'}, $b->{'@id'});
 }
 
 /**
@@ -1534,7 +1291,7 @@ class MappingKeySorter
 }
 
 /**
- * A container for JSON-LD processing state.
+ * A JSON-LD processor.
  */
 class JsonLdProcessor
 {
@@ -1543,9 +1300,327 @@ class JsonLdProcessor
     */
    public function __construct()
    {
-      $this->ng = new stdClass();
-      $this->ng->tmp = null;
-      $this->ng->c14n = null;
+   }
+
+   /**
+    * Recursively compacts a value. This method will compact IRIs to prefixes
+    * or terms and do reverse type coercion to compact a value.
+    *
+    * @param ctx the context to use.
+    * @param property the property that points to the value, NULL for none.
+    * @param value the value to compact.
+    * @param usedCtx a context to update if a value was used from "ctx".
+    *
+    * @return the compacted value.
+    */
+   public function compact($ctx, $property, $value, $usedCtx)
+   {
+      $rval;
+
+      // get JSON-LD keywords
+      $keywords = _getKeywords($ctx);
+
+      if($value === null)
+      {
+         // return null, but check coerce type to add to usedCtx
+         $rval = null;
+         $this->getCoerceType($ctx, $property, $usedCtx);
+      }
+      else if(is_array($value))
+      {
+         // recursively add compacted values to array
+         $rval = array();
+         foreach($value as $v)
+         {
+            $rval[] = $this->compact($ctx, $property, $v, $usedCtx);
+         }
+      }
+      // graph literal/disjoint graph
+      else if(
+         is_object($value) and
+         property_exists($value, '@id') and
+         is_array($value->{'@id'}))
+      {
+         $rval = new stdClass();
+         $rval->{$keywords->{'@id'}} = $this->compact(
+            $ctx, $property, $value->{'@id'}, $usedCtx);
+      }
+      // recurse if value is a subject
+      else if(_isSubject($value))
+      {
+         // recursively handle sub-properties that aren't a sub-context
+         $rval = new stdClass();
+         foreach($value as $key => $v)
+         {
+            if($v !== '@context')
+            {
+               // set object to compacted property, only overwrite existing
+               // properties if the property actually compacted
+               $p = _compactIri($ctx, $key, $usedCtx);
+               if($p !== $key or !property_exists($rval, $p))
+               {
+                  $rval->$p = $this->compact($ctx, $key, $v, $usedCtx);
+               }
+            }
+         }
+      }
+      else
+      {
+         // get coerce type
+         $coerce = $this->getCoerceType($ctx, $property, $usedCtx);
+
+         // get type from value, to ensure coercion is valid
+         $type = null;
+         if(is_object($value))
+         {
+            // type coercion can only occur if language is not specified
+            if(!property_exists($value, '@language'))
+            {
+               // type must match coerce type if specified
+               if(property_exists($value, '@type'))
+               {
+                  $type = $value->{'@type'};
+               }
+               // type is ID (IRI)
+               else if(property_exists($value, '@id'))
+               {
+                  $type = '@id';
+               }
+               // can be coerced to any type
+               else
+               {
+                  $type = $coerce;
+               }
+            }
+         }
+         // type can be coerced to anything
+         else if(is_string($value))
+         {
+            $type = $coerce;
+         }
+
+         // types that can be auto-coerced from a JSON-builtin
+         if($coerce === null and
+            ($type === JSONLD_XSD_BOOLEAN or $type === JSONLD_XSD_INTEGER or
+            $type === JSONLD_XSD_DOUBLE))
+         {
+            $coerce = $type;
+         }
+
+         // do reverse type-coercion
+         if($coerce !== null)
+         {
+            // type is only null if a language was specified, which is an error
+            // if type coercion is specified
+            if($type === null)
+            {
+               throw new Exception(
+                  'Cannot coerce type when a language is specified. ' .
+                  'The language information would be lost.');
+            }
+            // if the value type does not match the coerce type, it is an error
+            else if($type !== $coerce)
+            {
+               throw new Exception(
+                  'Cannot coerce type because the type does not match.');
+            }
+            // do reverse type-coercion
+            else
+            {
+               if(is_object($value))
+               {
+                  if(property_exists($value, '@id'))
+                  {
+                     $rval = $value->{'@id'};
+                  }
+                  else if(property_exists($value, '@value'))
+                  {
+                     $rval = $value->{'@value'};
+                  }
+               }
+               else
+               {
+                  $rval = $value;
+               }
+
+               // do basic JSON types conversion
+               if($coerce === JSONLD_XSD_BOOLEAN)
+               {
+                  $rval = ($rval === 'true' or $rval != 0);
+               }
+               else if($coerce === JSONLD_XSD_DOUBLE)
+               {
+                  $rval = floatval($rval);
+               }
+               else if($coerce === JSONLD_XSD_INTEGER)
+               {
+                  $rval = intval($rval);
+               }
+            }
+         }
+         // no type-coercion, just change keywords/copy value
+         else if(is_object($value))
+         {
+            $rval = new stdClass();
+            foreach($value as $key => $v)
+            {
+               $rval->{$keywords->$key} = $v;
+            }
+         }
+         else
+         {
+            $rval = _clone($value);
+         }
+
+         // compact IRI
+         if($type === '@id')
+         {
+            if(is_object($rval))
+            {
+               $rval->{$keywords->{'@id'}} = _compactIri(
+                  $ctx, $rval->{$keywords->{'@id'}}, $usedCtx);
+            }
+            else
+            {
+               $rval = _compactIri($ctx, $rval, $usedCtx);
+            }
+         }
+      }
+
+      return $rval;
+   }
+
+   /**
+    * Recursively expands a value using the given context. Any context in
+    * the value will be removed.
+    *
+    * @param ctx the context.
+    * @param property the property that points to the value, NULL for none.
+    * @param value the value to expand.
+    *
+    * @return the expanded value.
+    */
+   public function expand($ctx, $property, $value)
+   {
+      $rval;
+
+      // TODO: add data format error detection?
+
+      // value is null, nothing to expand
+      if($value === null)
+      {
+         $rval = null;
+      }
+      // if no property is specified and the value is a string (this means the
+      // value is a property itself), expand to an IRI
+      else if($property === null and is_string($value))
+      {
+         $rval = _expandTerm($ctx, $value, null);
+      }
+      else if(is_array($value))
+      {
+         // recursively add expanded values to array
+         $rval = array();
+         foreach($value as $v)
+         {
+            $rval[] = $this->expand($ctx, $property, $v);
+         }
+      }
+      else if(is_object($value))
+      {
+         // if value has a context, use it
+         if(property_exists($value, '@context'))
+         {
+            $ctx = jsonld_merge_contexts($ctx, $value->{'@context'});
+         }
+
+         // recursively handle sub-properties that aren't a sub-context
+         $rval = new stdClass();
+         foreach($value as $key => $v)
+         {
+            // preserve frame keywords
+            if($key === '@embed' or $key === '@explicit' or
+               $key === '@default' or $key === '@omitDefault')
+            {
+               _setProperty($rval, $key, _clone($v));
+            }
+            else if($key !== '@context')
+            {
+               // set object to expanded property
+               _setProperty(
+                  $rval, _expandTerm($ctx, $key, null),
+                  $this->expand($ctx, $key, $v));
+            }
+         }
+      }
+      else
+      {
+         // do type coercion
+         $coerce = $this->getCoerceType($ctx, $property, null);
+
+         // get JSON-LD keywords
+         $keywords = _getKeywords($ctx);
+
+         // automatic coercion for basic JSON types
+         if($coerce === null and !is_string($value) and
+            (is_numeric($value) or is_bool($value)))
+         {
+            if(is_bool($value))
+            {
+               $coerce = JSONLD_XSD_BOOLEAN;
+            }
+            else if(is_int($value))
+            {
+               $coerce = JSONLD_XSD_INTEGER;
+            }
+            else
+            {
+               $coerce = JSONLD_XSD_DOUBLE;
+            }
+         }
+
+         // special-case expand @id and @type (skips '@id' expansion)
+         if($property === '@id' or $property === $keywords->{'@id'} or
+            $property === '@type' or $property === $keywords->{'@type'})
+         {
+            $rval = _expandTerm($ctx, $value, null);
+         }
+         // coerce to appropriate type
+         else if($coerce !== null)
+         {
+            $rval = new stdClass();
+
+            // expand ID (IRI)
+            if($coerce === '@id')
+            {
+               $rval->{'@id'} = _expandTerm($ctx, $value, null);
+            }
+            // other type
+            else
+            {
+               $rval->{'@type'} = $coerce;
+               if($coerce === JSONLD_XSD_DOUBLE)
+               {
+                  // do special JSON-LD double format
+                  $value = preg_replace(
+                     '/(e(?:\+|-))([0-9])$/', '${1}0${2}',
+                     sprintf('%1.6e', $value));
+               }
+               else if($coerce === JSONLD_XSD_BOOLEAN)
+               {
+                  $value = $value ? 'true' : 'false';
+               }
+               $rval->{'@value'} = '' . $value;
+            }
+         }
+         // nothing to coerce
+         else
+         {
+            $rval = '' . $value;
+         }
+      }
+
+      return $rval;
    }
 
    /**
@@ -1563,8 +1638,13 @@ class JsonLdProcessor
 
       if($input !== null)
       {
+         // create name generator state
+         $this->ng = new stdClass();
+         $this->ng->tmp = null;
+         $this->ng->c14n = null;
+
          // expand input
-         $expanded = _expand(new stdClass(), null, $input, true);
+         $expanded = $this->expand(new stdClass(), null, $input);
 
          // assign names to unnamed bnodes
          $this->nameBlankNodes($expanded);
@@ -1597,6 +1677,47 @@ class JsonLdProcessor
    }
 
    /**
+    * Gets the coerce type for the given property.
+    *
+    * @param ctx the context to use.
+    * @param property the property to get the coerced type for.
+    * @param usedCtx a context to update if a value was used from "ctx".
+    *
+    * @return the coerce type, null for none.
+    */
+   public function getCoerceType($ctx, $property, $usedCtx)
+   {
+      $rval = null;
+
+      // get expanded property
+      $p = _expandTerm($ctx, $property, null);
+
+      // built-in type coercion JSON-LD-isms
+      if($p === '@id' or $p === '@type')
+      {
+         $rval = '@id';
+      }
+      else
+      {
+         // look up compacted property in coercion map
+         $p = _compactIri($ctx, $p, null);
+         if(property_exists($ctx, $p) and is_object($ctx->$p) and
+            property_exists($ctx->$p, '@type'))
+         {
+            // property found, return expanded type
+            $type = $ctx->$p->{'@type'};
+            $rval = _expandTerm($ctx, $type, $usedCtx);
+            if($usedCtx !== null)
+            {
+               $usedCtx->$p = _clone($ctx->$p);
+            }
+         }
+      }
+
+      return $rval;
+   }
+
+   /**
     * Assigns unique names to blank nodes that are unnamed in the given input.
     *
     * @param input the input to assign names to.
@@ -1614,12 +1735,11 @@ class JsonLdProcessor
       // uniquely name all unnamed bnodes
       foreach($bnodes as $i => $bnode)
       {
-         if(!property_exists($bnode, __S))
+         if(!property_exists($bnode, '@id'))
          {
             // generate names until one is unique
             while(property_exists($subjects, $ng->next()));
-            $bnode->{__S} = new stdClass();
-            $bnode->{__S}->{'@iri'} = $ng->current();
+            $bnode->{'@id'} = $ng->current();
             $subjects->{$ng->current()} = $bnode;
          }
       }
@@ -1634,10 +1754,10 @@ class JsonLdProcessor
     */
    public function renameBlankNode($b, $id)
    {
-      $old = $b->{__S}->{'@iri'};
+      $old = $b->{'@id'};
 
       // update bnode IRI
-      $b->{__S}->{'@iri'} = $id;
+      $b->{'@id'} = $id;
 
       // update subjects map
       $subjects = $this->subjects;
@@ -1675,10 +1795,10 @@ class JsonLdProcessor
                for($n = 0; $n < $length; ++$n)
                {
                   if(is_object($tmp[$n]) and
-                     property_exists($tmp[$n], '@iri') and
-                     $tmp[$n]->{'@iri'} === $old)
+                     property_exists($tmp[$n], '@id') and
+                     $tmp[$n]->{'@id'} === $old)
                   {
-                     $tmp[$n]->{'@iri'} = $id;
+                     $tmp[$n]->{'@id'} = $id;
                   }
                }
             }
@@ -1721,7 +1841,7 @@ class JsonLdProcessor
       $bnodes = array();
       foreach($input as $v)
       {
-         $iri = $v->{__S}->{'@iri'};
+         $iri = $v->{'@id'};
          $subjects->$iri = $v;
          $edges->refs->$iri = new stdClass();
          $edges->refs->$iri->all = array();
@@ -1746,13 +1866,13 @@ class JsonLdProcessor
       // and initialize serializations
       foreach($bnodes as $i => $bnode)
       {
-         $iri = $bnode->{__S}->{'@iri'};
+         $iri = $bnode->{'@id'};
          if($c14n->inNamespace($iri))
          {
             // generate names until one is unique
             while(property_exists($subjects, $ngTmp->next()));
             $this->renameBlankNode($bnode, $ngTmp->current());
-            $iri = $bnode->{__S}->{'@iri'};
+            $iri = $bnode->{'@id'};
          }
          $this->serializations->$iri = new stdClass();
          $this->serializations->$iri->props = null;
@@ -1760,13 +1880,20 @@ class JsonLdProcessor
       }
 
       // keep sorting and naming blank nodes until they are all named
+      $resort = true;
       while(count($bnodes) > 0)
       {
-         usort($bnodes, array($this, 'deepCompareBlankNodes'));
+         if($resort)
+         {
+            $resort = false;
+            usort($bnodes, array($this, 'deepCompareBlankNodes'));
+         }
 
          // name all bnodes according to the first bnode's relation mappings
+         // (if it has mappings then a resort will be necessary)
          $bnode = array_shift($bnodes);
-         $iri = $bnode->{__S}->{'@iri'};
+         $iri = $bnode->{'@id'};
+         $resort = ($this->serializations->$iri->{'props'} !== null);
          $dirs = array('props', 'refs');
          foreach($dirs as $dir)
          {
@@ -1802,13 +1929,17 @@ class JsonLdProcessor
             $bnodes = array();
             foreach($tmp as $i => $b)
             {
-               $iriB = $b->{__S}->{'@iri'};
+               $iriB = $b->{'@id'};
                if(!$c14n->inNamespace($iriB))
                {
                   // mark serializations related to the named bnodes as dirty
                   foreach($renamed as $r)
                   {
-                     $this->markSerializationDirty($iriB, $r, $dir);
+                     if($this->markSerializationDirty($iriB, $r, $dir))
+                     {
+                        // resort if a serialization was marked dirty
+                        $resort = true;
+                     }
                   }
                   $bnodes[] = $b;
                }
@@ -1840,14 +1971,19 @@ class JsonLdProcessor
     * @param iri the IRI of the bnode to check.
     * @param changed the old IRI of the bnode that changed.
     * @param dir the direction to check ('props' or 'refs').
+    *
+    * @return true if the serialization was marked dirty, false if not.
     */
    public function markSerializationDirty($iri, $changed, $dir)
    {
+      $rval = false;
       $s = $this->serializations->$iri;
       if($s->$dir !== null and property_exists($s->$dir->m, $changed))
       {
          $s->$dir = null;
+         $rval = true;
       }
+      return $rval;
    }
 
    /**
@@ -1865,7 +2001,7 @@ class JsonLdProcessor
       $first = true;
       foreach($b as $p => $o)
       {
-         if($p !== '@subject')
+         if($p !== '@id')
          {
             if($first)
             {
@@ -1885,27 +2021,27 @@ class JsonLdProcessor
             {
                if(is_object($obj))
                {
-                  // iri
-                  if(property_exists($obj, '@iri'))
+                  // ID (IRI)
+                  if(property_exists($obj, '@id'))
                   {
-                     if(_isBlankNodeIri($obj->{'@iri'}))
+                     if(_isBlankNodeIri($obj->{'@id'}))
                      {
                         $rval .= '_:';
                      }
                      else
                      {
-                        $rval .= '<' . $obj->{'@iri'} . '>';
+                        $rval .= '<' . $obj->{'@id'} . '>';
                      }
                   }
                   // literal
                   else
                   {
-                     $rval .= '"' . $obj->{'@literal'} . '"';
+                     $rval .= '"' . $obj->{'@value'} . '"';
 
-                     // datatype literal
-                     if(property_exists($obj, '@datatype'))
+                     // type literal
+                     if(property_exists($obj, '@type'))
                      {
-                        $rval .= '^^<' . $obj->{'@datatype'} . '>';
+                        $rval .= '^^<' . $obj->{'@type'} . '>';
                      }
                      // language literal
                      else if(property_exists($obj, '@language'))
@@ -2154,8 +2290,8 @@ class JsonLdProcessor
       $rval = 0;
 
       // compare IRIs
-      $iriA = $a->{__S}->{'@iri'};
-      $iriB = $b->{__S}->{'@iri'};
+      $iriA = $a->{'@id'};
+      $iriB = $b->{'@id'};
       if($iriA === $iriB)
       {
          $rval = 0;
@@ -2257,8 +2393,8 @@ class JsonLdProcessor
       // step #4
       if($rval === 0)
       {
-         $edgesA = $this->edges->refs->{$a->{__S}->{'@iri'}}->all;
-         $edgesB = $this->edges->refs->{$b->{__S}->{'@iri'}}->all;
+         $edgesA = $this->edges->refs->{$a->{'@id'}}->all;
+         $edgesB = $this->edges->refs->{$b->{'@id'}}->all;
          $edgesALen = count($edgesA);
          $rval = _compare($edgesALen, count($edgesB));
       }
@@ -2347,16 +2483,16 @@ class JsonLdProcessor
       {
          foreach($subject as $key => $object)
          {
-            if($key !== __S)
+            if($key !== '@id')
             {
                // normalize to array for single codepath
                $tmp = !is_array($object) ? array($object) : $object;
                foreach($tmp as $o)
                {
-                  if(is_object($o) and property_exists($o, '@iri') and
-                     property_exists($this->subjects, $o->{'@iri'}))
+                  if(is_object($o) and property_exists($o, '@id') and
+                     property_exists($this->subjects, $o->{'@id'}))
                   {
-                     $objIri = $o->{'@iri'};
+                     $objIri = $o->{'@id'};
 
                      // map object to this subject
                      $e = new stdClass();
@@ -2403,22 +2539,20 @@ function _isType($input, $frame)
    $rval = false;
 
    // check if type(s) are specified in frame and input
-   $type = JSONLD_RDF_TYPE;
-   if(property_exists($frame, JSONLD_RDF_TYPE) and
-      is_object($input) and property_exists($input, __S) and
-      property_exists($input, JSONLD_RDF_TYPE))
+   $type = '@type';
+   if(property_exists($frame, $type) and
+      is_object($input) and
+      property_exists($input, $type))
    {
-      $tmp = is_array($input->{JSONLD_RDF_TYPE}) ?
-         $input->{JSONLD_RDF_TYPE} : array($input->{JSONLD_RDF_TYPE});
-      $types = is_array($frame->$type) ?
-         $frame->{JSONLD_RDF_TYPE} : array($frame->{JSONLD_RDF_TYPE});
+      $tmp = is_array($input->$type) ? $input->$type : array($input->$type);
+      $types = is_array($frame->$type) ? $frame->$type : array($frame->$type);
       $length = count($types);
       for($t = 0; $t < $length and !$rval; ++$t)
       {
-         $type = $types[$t]->{'@iri'};
+         $type = $types[$t];
          foreach($tmp as $e)
          {
-            if($e->{'@iri'} === $type)
+            if($e === $type)
             {
                $rval = true;
                break;
@@ -2455,7 +2589,7 @@ function _isDuckType($input, $frame)
    $rval = false;
 
    // frame must not have a specific type
-   if(!property_exists($frame, JSONLD_RDF_TYPE))
+   if(!property_exists($frame, '@type'))
    {
       // get frame properties that must exist on input
       $props = array_filter(array_keys((array)$frame), '_filterNonKeywords');
@@ -2465,7 +2599,7 @@ function _isDuckType($input, $frame)
          $rval = true;
       }
       // input must be a subject with all the given properties
-      else if(is_object($input) and property_exists($input, __S))
+      else if(is_object($input) and property_exists($input, '@id'))
       {
          $rval = true;
          foreach($props as $prop)
@@ -2483,17 +2617,227 @@ function _isDuckType($input, $frame)
 }
 
 /**
+ * Recursively removes dependent dangling embeds.
+ *
+ * @param iri the iri of the parent to remove embeds for.
+ * @param embeds the embeds map.
+ */
+function removeDependentEmbeds($iri, $embeds)
+{
+   $iris = get_object_vars($embeds);
+   foreach($iris as $i => $embed)
+   {
+      if($embed->parent !== null and
+         $embed->parent->{'@id'} === $iri)
+      {
+         unset($embeds->$i);
+         removeDependentEmbeds($i, $embeds);
+      }
+   }
+}
+
+/**
+ * Subframes a value.
+ *
+ * @param subjects a map of subjects in the graph.
+ * @param value the value to subframe.
+ * @param frame the frame to use.
+ * @param embeds a map of previously embedded subjects, used to prevent cycles.
+ * @param autoembed true if auto-embed is on, false if not.
+ * @param parent the parent object.
+ * @param parentKey the parent object.
+ * @param options the framing options.
+ *
+ * @return the framed input.
+ */
+function _subframe(
+   $subjects, $value, $frame, $embeds, $autoembed,
+   $parent, $parentKey, $options)
+{
+   // get existing embed entry
+   $iri = $value->{'@id'};
+   $embed = property_exists($embeds, $iri) ? $embeds->{$iri} : null;
+
+   // determine if value should be embedded or referenced,
+   // embed is ON if:
+   // 1. The frame OR default option specifies @embed as ON, AND
+   // 2. There is no existing embed OR it is an autoembed, AND
+   //    autoembed mode is off.
+   $embedOn = (
+      ((property_exists($frame, '@embed') and $frame->{'@embed'}) or
+      (!property_exists($frame, '@embed') and $options->defaults->embedOn)) and
+      ($embed === null or ($embed->autoembed and !$autoembed)));
+
+   if(!$embedOn)
+   {
+      // not embedding, so only use subject IRI as reference
+      $tmp = new stdClass();
+      $tmp->{'@id'} = $value->{'@id'};
+      $value = $tmp;
+   }
+   else
+   {
+      // create new embed entry
+      if($embed === null)
+      {
+         $embed = new stdClass();
+         $embeds->{$iri} = $embed;
+      }
+      // replace the existing embed with a reference
+      else if($embed->parent !== null)
+      {
+         if(is_array($embed->parent->{$embed->key}))
+         {
+            // find and replace embed in array
+            $arrLen = count($embed->parent->{$embed->key});
+            for($i = 0; $i < $arrLen; ++$i)
+            {
+               $obj = $embed->parent->{$embed->key}[$i];
+               if(is_object($obj) and property_exists($obj, '@id') and
+                  $obj->{'@id'} === $iri)
+               {
+                  $tmp = new stdClass();
+                  $tmp->{'@id'} = $value->{'@id'};
+                  $embed->parent->{$embed->key}[$i] = $tmp;
+                  break;
+               }
+            }
+         }
+         else
+         {
+            $tmp = new stdClass();
+            $tmp->{'@id'} = $value->{'@id'};
+            $embed->parent->{$embed->key} = $tmp;
+         }
+
+         // recursively remove any dependent dangling embeds
+         removeDependentEmbeds($iri, $embeds);
+      }
+
+      // update embed entry
+      $embed->autoembed = $autoembed;
+      $embed->parent = $parent;
+      $embed->key = $parentKey;
+
+      // check explicit flag
+      $explicitOn = property_exists($frame, '@explicit') ?
+         $frame->{'@explicit'} : $options->defaults->explicitOn;
+      if($explicitOn)
+      {
+         // remove keys from the value that aren't in the frame
+         foreach($value as $key => $v)
+         {
+            // do not remove @id or any frame key
+            if($key !== '@id' and !property_exists($frame, $key))
+            {
+               unset($value->$key);
+            }
+         }
+      }
+
+      // iterate over keys in value
+      $vars = get_object_vars($value);
+      foreach($vars as $key => $v)
+      {
+         // skip keywords
+         if(strpos($key, '@') !== 0)
+         {
+            // get the subframe if available
+            if(property_exists($frame, $key))
+            {
+               $f = $frame->{$key};
+               $_autoembed = false;
+            }
+            // use a catch-all subframe to preserve data from graph
+            else
+            {
+               $f = is_array($v) ? array() : new stdClass();
+               $_autoembed = true;
+            }
+
+            // build input and do recursion
+            $input = is_array($v) ? $v : array($v);
+            $length = count($input);
+            for($n = 0; $n < $length; ++$n)
+            {
+               // replace reference to subject w/embedded subject
+               if(is_object($input[$n]) and
+                  property_exists($input[$n], '@id') and
+                  property_exists($subjects, $input[$n]->{'@id'}))
+               {
+                  $input[$n] = $subjects->{$input[$n]->{'@id'}};
+               }
+            }
+            $value->$key = _frame(
+               $subjects, $input, $f, $embeds, $_autoembed,
+               $value, $key, $options);
+         }
+      }
+
+      // iterate over frame keys to add any missing values
+      foreach($frame as $key => $f)
+      {
+         // skip keywords and non-null keys in value
+         if(strpos($key, '@') !== 0 and
+            (!property_exists($value, $key) || $value->{$key} === null))
+         {
+            // add empty array to value
+            if(is_array($f))
+            {
+               // add empty array/null property to value
+               $value->$key = array();
+            }
+            // add default value to value
+            else
+            {
+               // use first subframe if frame is an array
+               if(is_array($f))
+               {
+                  $f = (count($f) > 0) ? $f[0] : new stdClass();
+               }
+
+               // determine if omit default is on
+               $omitOn = property_exists($f, '@omitDefault') ?
+                  $f->{'@omitDefault'} :
+                  $options->defaults->omitDefaultOn;
+               if(!$omitOn)
+               {
+                  if(property_exists($f, '@default'))
+                  {
+                     // use specified default value
+                     $value->{$key} = $f->{'@default'};
+                  }
+                  else
+                  {
+                     // build-in default value is: null
+                     $value->{$key} = null;
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   return $value;
+}
+
+/**
  * Recursively frames the given input according to the given frame.
  *
  * @param subjects a map of subjects in the graph.
  * @param input the input to frame.
  * @param frame the frame to use.
  * @param embeds a map of previously embedded subjects, used to prevent cycles.
+ * @param autoembed true if auto-embed is on, false if not.
+ * @param parent the parent object (for subframing), null for none.
+ * @param parentKey the parent key (for subframing), null for none.
  * @param options the framing options.
  *
  * @return the framed input.
  */
-function _frame($subjects, $input, $frame, $embeds, $options)
+function _frame(
+   $subjects, $input, $frame, $embeds, $autoembed,
+   $parent, $parentKey, $options)
 {
    $rval = null;
 
@@ -2534,10 +2878,10 @@ function _frame($subjects, $input, $frame, $embeds, $options)
       {
          // dereference input if it refers to a subject
          $next = $input[$n];
-         if(is_object($next) and property_exists($next, '@iri') and
-            property_exists($subjects, $next->{'@iri'}))
+         if(is_object($next) and property_exists($next, '@id') and
+            property_exists($subjects, $next->{'@id'}))
          {
-            $next = $subjects->{$next->{'@iri'}};
+            $next = $subjects->{$next->{'@id'}};
          }
 
          // add input to list if it matches frame specific type or duck-type
@@ -2558,102 +2902,12 @@ function _frame($subjects, $input, $frame, $embeds, $options)
       {
          $frame = $frames[$i1];
 
-         // determine if value should be embedded or referenced
-         $embedOn = property_exists($frame, '@embed') ?
-            $frame->{'@embed'} : $options->defaults->embedOn;
-         if(!$embedOn)
+         // if value is a subject, do subframing
+         if(_isSubject($value))
          {
-            // if value is a subject, only use subject IRI as reference
-            if(is_object($value) and property_exists($value, __S))
-            {
-               $value = $value->{__S};
-            }
-         }
-         else if(
-            is_object($value) and property_exists($value, __S) and
-            property_exists($embeds, $value->{__S}->{'@iri'}))
-         {
-            // TODO: possibly support multiple embeds in the future ... and
-            // instead only prevent cycles?
-            throw new Exception(
-               'Multiple embeds of the same subject is not supported. ' .
-               'subject=' . $value->{__S}->{'@iri'});
-         }
-         // if value is a subject, do embedding and subframing
-         else if(is_object($value) and property_exists($value, __S))
-         {
-            $embeds->{$value->{__S}->{'@iri'}} = true;
-
-            // if explicit is on, remove keys from value that aren't in frame
-            $explicitOn = property_exists($frame, '@explicit') ?
-               $frame->{'@explicit'} : $options->defaults->explicitOn;
-            if($explicitOn)
-            {
-               foreach($value as $key => $v)
-               {
-                  // do not remove subject or any key in the frame
-                  if($key !== __S and !property_exists($frame, $key))
-                  {
-                     unset($value->$key);
-                  }
-               }
-            }
-
-            // iterate over frame keys to do subframing
-            foreach($frame as $key => $f)
-            {
-               // skip keywords and type query
-               if(strpos($key, '@') !== 0 and $key !== JSONLD_RDF_TYPE)
-               {
-                  if(property_exists($value, $key))
-                  {
-                     // build input and do recursion
-                     $input = is_array($value->$key) ?
-                        $value->$key : array($value->$key);
-                     $length = count($input);
-                     for($n = 0; $n < $length; ++$n)
-                     {
-                        // replace reference to subject w/subject
-                        if(is_object($input[$n]) and
-                           property_exists($input[$n], '@iri') and
-                           property_exists($subjects, $input[$n]->{'@iri'}))
-                        {
-                           $input[$n] = $subjects->{$input[$n]->{'@iri'}};
-                        }
-                     }
-                     $value->$key = _frame(
-                        $subjects, $input, $f, $embeds, $options);
-                  }
-                  else
-                  {
-                     // add empty array/null property to value
-                     $value->$key = is_array($f) ? array() : null;
-                  }
-
-                  // handle setting default value
-                  if($value->$key === null)
-                  {
-                     // use first subframe if frame is an array
-                     if(is_array($f))
-                     {
-                        $f = (count($f) > 0) ? $f[0] : new stdClass();
-                     }
-
-                     // determine if omit default is on
-                     $omitOn = property_exists($f, '@omitDefault') ?
-                        $f->{'@omitDefault'} :
-                        $options->defaults->omitDefaultOn;
-                     if($omitOn)
-                     {
-                        unset($value->$key);
-                     }
-                     else if(property_exists($f, '@default'))
-                     {
-                        $value->$key = $f->{'@default'};
-                     }
-                  }
-               }
-            }
+            $value = _subframe(
+               $subjects, $value, $frame, $embeds, $autoembed,
+               $parent, $parentKey, $options);
          }
 
          // add value to output
@@ -2663,7 +2917,15 @@ function _frame($subjects, $input, $frame, $embeds, $options)
          }
          else
          {
-            $rval[] = $value;
+            // determine if value is a reference to an embed
+            $isRef = (_isReference($value) and
+               property_exists($embeds, $value->{'@id'}));
+
+            // push any value that isn't a parentless reference
+            if(!($parent === null and $isRef))
+            {
+               $rval[] = $value;
+            }
          }
       }
    }
